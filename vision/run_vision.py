@@ -22,6 +22,18 @@ def setup_logger():
     logger.info("Starting Vision. . .")
 
 
+# TODO: Add more fields as needed.
+# Additional output fields (to include with tag_data / published JSON):
+# rawBytes (byte[]): A byte-packed string that contains target info from the same timestamp.
+# latencyMillis (double): The latency of the pipeline in milliseconds.
+# hasTarget (boolean): Whether the pipeline is detecting targets or not.
+# targetPitch (double): The pitch of the target in degrees (positive up).
+# targetYaw (double): The yaw of the target in degrees (positive right).
+# targetArea (double): The area (percent of bounding box in screen) as a percent (0-100).
+# targetSkew (double): The skew of the target in degrees (counter-clockwise positive).
+# targetPose (double[]): The pose of the target relative to the robot (x, y, z, qw, qx, qy, qz).
+# targetPixelsX (double): The target crosshair location horizontally, in pixels (origin top-right).
+# targetPixelsY (double): The target crosshair location vertically, in pixels (origin top-right).
 class TagDetector:
     def __init__(self, families="tag36h11"):
         self.logger = logging.getLogger()
@@ -51,6 +63,46 @@ class TagDetector:
         """
         self.results = self.detector.detect(frame)
         return self.results
+    
+    def get_corners(self):
+        return [r.corners for r in self.results]
+    
+    def get_pitch_yaw(self):
+        pitch_yaw_list = []
+        for r in self.results:
+            # Calculate pitch and yaw based on the center coordinates
+            cX, cY = r.center
+            pitch = -((cY - 360) / 720) * 45  # Assuming 45 degrees vertical FOV
+            yaw = ((cX - 640) / 1280) * 60    # Assuming 60 degrees horizontal FOV
+            pitch_yaw_list.append((pitch, yaw))
+        return pitch_yaw_list
+    
+    def get_areas(self):
+        areas = []
+        for r in self.results:
+            corners = np.array(r.corners, dtype=np.float32)
+            area = cv2.contourArea(corners)
+            areas.append(area)
+        return areas
+
+    def get_pixels(self):
+        pixels = []
+        for r in self.results:
+            cX, cY = r.center
+            pixels.append((cX, cY))
+        return pixels
+    
+    def get_skews(self):
+        skews = []
+        for r in self.results:
+            corners = np.array(r.corners, dtype=np.float32)
+            vector1 = corners[1] - corners[0]
+            vector2 = corners[2] - corners[1]
+            angle1 = np.arctan2(vector1[1], vector1[0])
+            angle2 = np.arctan2(vector2[1], vector2[0])
+            skew = np.degrees(angle2 - angle1)
+            skews.append(skew)
+        return skews
 
     def draw_boxes(self, frame):
         """
@@ -133,8 +185,17 @@ class JsonStringPublisher:
         self.pub = table.getStringTopic("json").publish()
 
     def set(self, data):
-        json_str = json.dumps(data)
+        json_str = json.dumps(data, default=_json_default)
         self.pub.set(json_str)
+
+def _json_default(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
 def main():
@@ -164,6 +225,7 @@ def main():
     #     },
     #     ...
     # }
+
     tag_data = {}
 
     while True:
@@ -175,18 +237,31 @@ def main():
             continue
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = np.ascontiguousarray(gray, dtype=np.uint8)  # <-- critical
+        gray = np.ascontiguousarray(gray, dtype=np.uint8)
         results = detector.detect(gray)
-        frame = detector.draw_boxes(output_img)
+        tag_data['hasTargets'] = len(results) > 0
         for result in results:
             tag_id = int(result.tag_id)
             center = [float(result.center[0]), float(result.center[1])]
             corners = [[float(c[0]), float(c[1])] for c in result.corners]
+            pitch, yaw = detector.get_pitch_yaw()[0] if detector.get_pitch_yaw() else (0, 0)
+            area = detector.get_areas()[0] if detector.get_areas() else 0
+            pixels = detector.get_pixels()[0] if detector.get_pixels() else (0, 0)
+            skew = detector.get_skews()[0] if detector.get_skews() else 0
             tag_data[tag_id] = {
                 "center": center,
                 "corners": corners,
+                "targetPitch": pitch,
+                "targetYaw": yaw,
+                "targetArea": area,
+                "targetPixelsX": pixels[0],
+                "targetPixelsY": pixels[1],
+                "targetSkew": skew
             }
             string_pub.set(tag_data)
+
+        # Draw boxes on frame
+        frame = detector.draw_boxes(output_img)
 
         # Write image to UI
         ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
