@@ -1,0 +1,15 @@
+services:
+  vision:
+    image: akafigmo/ri3d-vision:vision
+    networks: [vision_net]
+    devices:
+      - /dev/video0:/dev/video0
+
+  vision-ui:
+    image: akafigmo/ri3d-vision:vision-ui
+    ports:
+      - "8501:8501"
+    networks: [vision_net]
+
+networks:
+  vision_net:

@@ -1,0 +1,4 @@
+streamlit
+pyntcore
+robotpy-cscore
+opencv-contrib-python
