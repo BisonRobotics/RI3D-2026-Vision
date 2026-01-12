@@ -6,6 +6,7 @@ import sys
 import time
 from cscore import CameraServer
 import numpy as np
+import json
 
 
 # TODO: Graceful shutdown with sigterm
@@ -22,17 +23,6 @@ def setup_logger():
 
 
 class TagDetector:
-    """
-    Drop-in replacement for your TagDetector using pupil-apriltags.
-
-    Public methods preserved:
-      - detect(frame_gray_uint8) -> list[detections]
-      - draw_boxes(frame_bgr) -> frame_bgr
-      - get_centers() -> list[(x, y)]
-      - get_ids() -> list[int]
-      - set_families(families)
-    """
-
     def __init__(self, families="tag36h11"):
         self.logger = logging.getLogger()
         self.families = families
@@ -67,7 +57,6 @@ class TagDetector:
         Draws tag outlines + centers + family label.
         Expects BGR image in OpenCV format.
         """
-
         for r in self.results:
             # corners is (4,2): [ [x0,y0], [x1,y1], [x2,y2], [x3,y3] ]
             corners = np.array(r.corners, dtype=np.float32)
@@ -138,6 +127,16 @@ class IdPublisher:
     def set(self, ids):
         self.pub.set(ids)
 
+class JsonStringPublisher:
+    def __init__(self, table):
+        self.table = table
+        self.pub = table.getStringTopic("json").publish()
+
+    def set(self, data):
+        json_str = json.dumps(data)
+        self.pub.set(json_str)
+
+
 def main():
     setup_logger() # Setup up global logger
     logger  = logging.getLogger() # Get instance of logger
@@ -146,7 +145,7 @@ def main():
     server.start()
     vision_table = server.get_table("Vision")
     img_pub = ImagePublisher(vision_table)
-    id_pub = IdPublisher(vision_table)
+    string_pub = JsonStringPublisher(vision_table)
 
     # capture = cv2.VideoCapture(2)
     img = np.zeros(shape=(720, 1280, 3), dtype=np.uint8)
@@ -156,7 +155,17 @@ def main():
     input_stream = CameraServer.getVideo()
     output_stream = CameraServer.putVideo('Processed', 1280, 720)
 
-    loop_counter = [0]
+    # April tag data is stored here and then published as JSON.
+    # Data shall be stored as:
+    # {
+    #     "id": {
+    #         "center": [x, y],
+    #         "corners": [ [x0, y0], [x1, y1], [x2, y2], [x3, y3] ],
+    #     },
+    #     ...
+    # }
+    tag_data = {}
+
     while True:
         # ret, frame = capture.read()
         frame_time, frame = input_stream.grabFrame(img)
@@ -169,12 +178,24 @@ def main():
         gray = np.ascontiguousarray(gray, dtype=np.uint8)  # <-- critical
         results = detector.detect(gray)
         frame = detector.draw_boxes(output_img)
+        for result in results:
+            tag_id = int(result.tag_id)
+            center = [float(result.center[0]), float(result.center[1])]
+            corners = [[float(c[0]), float(c[1])] for c in result.corners]
+            tag_data[tag_id] = {
+                "center": center,
+                "corners": corners,
+            }
+            string_pub.set(tag_data)
+
+        # Write image to UI
         ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if ok:
             img_pub.set(jpg.tobytes())
-        loop_counter[0] += 1
-        id_pub.set(loop_counter)   
+
+        # Write image to output stream
         output_stream.putFrame(output_img)
+
         time.sleep(1/30)  # Simulate 30 FPS
 
 
